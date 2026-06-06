@@ -56,6 +56,16 @@ export async function onRequest(context) {
             settings.webDAV.internalTokenId = '';
         }
 
+        // 同步私密文件夹到独立存储
+        if (body.privateFolders !== undefined) {
+            const folders = typeof body.privateFolders === 'string'
+                ? body.privateFolders.split(/[,，\n]+/).map(s => s.trim()).filter(Boolean)
+                : body.privateFolders
+            await db.put('manage@privateFolders', JSON.stringify(folders))
+            // 设置中只保留逗号分隔字符串
+            settings.privateFolders = folders.join(', ')
+        }
+
         // 写入数据库
         await db.put('manage@sysConfig@others', JSON.stringify(settings))
 
@@ -114,11 +124,24 @@ export async function getOthersConfig(db, env) {
     // 公开浏览
     const kvPublicBrowse = settingsKV.publicBrowse || {}
     settings.publicBrowse = {
-        enabled: kvPublicBrowse.enabled ?? false,
-        allowedDir: kvPublicBrowse.allowedDir || '',
+        enabled: kvPublicBrowse.enabled ?? true,
+        allowedDir: kvPublicBrowse.allowedDir || '*',
         fixed: false,
     }
 
+    // 私密文件夹（逗号分隔的路径列表）
+    // 优先从独立存储读取，兼容旧设置在 settingsKV 中的情况
+    let privateFoldersList = []
+    try {
+        const pfRaw = await db.get('manage@privateFolders')
+        if (pfRaw) privateFoldersList = JSON.parse(pfRaw)
+    } catch { /* ignore */ }
+    if (!privateFoldersList.length && settingsKV.privateFolders) {
+        const raw = settingsKV.privateFolders
+        privateFoldersList = Array.isArray(raw) ? raw
+            : raw.split(/[,，\n]+/).map(s => s.trim()).filter(Boolean)
+    }
+    settings.privateFolders = privateFoldersList.join(', ')
 
     return settings;
 }

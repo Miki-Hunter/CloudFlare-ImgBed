@@ -1,5 +1,8 @@
 import { fetchOthersConfig } from "../../utils/sysConfig";
 import { readIndex } from '../../utils/indexManager.js';
+import { getPrivateFolders, isInPrivateFolder } from '../manage/privateFolders.js';
+import { getDatabase } from '../../utils/databaseAdapter.js';
+import { authenticate, AUTH_SCOPE } from '../../utils/auth/authCore.js';
 
 // CORS 跨域响应头
 const corsHeaders = {
@@ -136,6 +139,24 @@ export async function onRequest(context) {
         const othersConfig = await fetchOthersConfig(env);
         const publicBrowse = othersConfig.publicBrowse || {};
 
+        // 获取私密文件夹列表
+        const db = getDatabase(env);
+        const privateFolders = await getPrivateFolders(db);
+
+        // 检查是否为管理员（管理员可以浏览私密文件夹）
+        let isAdmin = false;
+        try {
+            const authResult = await authenticate({
+                env, request,
+                requiredPermission: null,
+                authScope: AUTH_SCOPE.ADMIN,
+            });
+            isAdmin = authResult.authorized;
+        } catch { /* 非管理员不影响 */ }
+
+        // 非管理员才需要过滤私密文件夹
+        const shouldFilterPrivate = !isAdmin;
+
         // 检查是否启用公开浏览
         if (!publicBrowse.enabled) {
             return new Response(JSON.stringify({ error: 'Public browse is disabled' }), {
@@ -167,6 +188,21 @@ export async function onRequest(context) {
             });
         }
 
+        // 如果请求的目录本身是私密目录，非管理员禁止访问
+        if (shouldFilterPrivate && isInPrivateFolder(dir, privateFolders)) {
+            return new Response(JSON.stringify({
+                error: 'This directory is private',
+                isPrivate: true,
+                files: [],
+                directories: [],
+                totalCount: 0,
+                returnedCount: 0,
+            }), {
+                status: 403,
+                headers: { 'Content-Type': 'application/json', ...corsHeaders }
+            });
+        }
+
         // 处理目录格式
         if (dir) {
             // 路径安全处理：防止路径穿越
@@ -186,10 +222,14 @@ export async function onRequest(context) {
         // 获取文件列表（带缓存）
         const cachedData = await getPublicFileList(context, url, dir, recursive);
 
-        // 过滤子目录，只返回允许的目录
+        // 过滤子目录：只返回允许的目录（私密目录也显示，前端会标记🔒）
         const filteredDirectories = cachedData.directories.filter(subDir => {
-            return isAllowedDirectory(subDir, allowedDirs);
-        });
+            if (!isAllowedDirectory(subDir, allowedDirs)) return false;
+            return true;
+        }).map(subDir => ({
+            name: subDir,
+            isPrivate: isInPrivateFolder(subDir, privateFolders),
+        }));
 
         // 文件类型过滤辅助函数
         const imageExts = ['jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp', 'svg', 'avif'];
@@ -202,6 +242,13 @@ export async function onRequest(context) {
         const isAudioFile = (name) => audioExts.includes(getFileExt(name));
 
         let filteredFiles = cachedData.files;
+
+        // 过滤私密文件夹中的文件（仅非管理员）
+        if (shouldFilterPrivate) {
+            filteredFiles = filteredFiles.filter(file => {
+                return !isInPrivateFolder(file.id || file.name || '', privateFolders);
+            });
+        }
 
         // 搜索过滤
         if (search) {

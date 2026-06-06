@@ -2,7 +2,7 @@ version: '3.8'
 
 services:
   imgbed:
-    image: marseventh/cloudflare-imgbed:latest
+    image: miki-hunter/cloudflare-imgbed:latest
     ports:
       - "7658:8080"
     volumes:
